@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	twitterscraper "github.com/n0madic/twitter-scraper"
@@ -28,7 +31,19 @@ func main() {
 	// go scraper("Icetea_Labs")
 	// time.Sleep(time.Second * 5)
 
-	sendMessage()
+	go sendMessage()
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	done := make(chan bool, 1)
+	go func() {
+		sig := <-sigs
+		fmt.Println()
+		fmt.Println(sig)
+		done <- true
+	}()
+	fmt.Println("awaiting signal")
+	<-done
+	fmt.Println("exiting")
 }
 func sendMessage() {
 	mongoclient, err := mongo.Connect(context.TODO(), options.Client().ApplyURI("mongodb://localhost:27017"))
@@ -50,7 +65,7 @@ func sendMessage() {
 	}
 	bot.Debug = true
 	u := tgbotapi.NewUpdate(0)
-	u.Timeout = 60
+	// u.Timeout = 60
 	updates := bot.GetUpdatesChan(u)
 	if err != nil {
 		fmt.Println(err)
@@ -60,32 +75,37 @@ func sendMessage() {
 		if update.Message != nil { // If we got a message
 			// log.Printf("[%s] %s", update.Message.From.UserName, update.Message.Text)
 			// go scraper(update.Message.Text)
-			for i := 0; i < len(scraper(update.Message.Text)); i++ {
-				collection.InsertOne(context.Background(), bson.D{
-					{Key: "username", Value: update.Message.Text},
-					{Key: "URLs", Value: scraper(update.Message.Text)[i]},
-					{Key: "isSent", Value: false},
-				})
-				//check if tweet is sent
-				var result bson.M
-				err := collection.FindOne(context.Background(), bson.D{
-					{Key: "username", Value: update.Message.Text},
-					{Key: "URLs", Value: scraper(update.Message.Text)[i]},
-				}).Decode(&result)
-				if err != nil {
-					fmt.Println(err)
-				}
-				if result["isSent"] == false {
-					bot.Send(tgbotapi.NewMessage(1262995839, scraper(update.Message.Text)[i]))
-					collection.UpdateOne(context.Background(), bson.D{
+			for {
+				tweetURLs := scraper(update.Message.Text)
+				for _, tweetURL := range tweetURLs {
+					collection.InsertOne(context.Background(), bson.D{
 						{Key: "username", Value: update.Message.Text},
-						{Key: "URLs", Value: scraper(update.Message.Text)[i]},
-					}, bson.D{
-						{Key: "$set", Value: bson.D{
-							{Key: "isSent", Value: true},
-						}},
+						{Key: "URLs", Value: tweetURL},
+						{Key: "isSent", Value: false},
 					})
+					//check if tweet is sent
+					var result bson.M
+					err := collection.FindOne(context.Background(), bson.D{
+						{Key: "username", Value: update.Message.Text},
+						{Key: "URLs", Value: tweetURL},
+					}).Decode(&result)
+					if err != nil {
+						fmt.Println(err)
+					}
+					if result["isSent"] == false {
+						bot.Send(tgbotapi.NewMessage(1262995839, tweetURL))
+						collection.UpdateOne(context.Background(), bson.D{
+							{Key: "username", Value: update.Message.Text},
+							{Key: "URLs", Value: tweetURL},
+						}, bson.D{
+							{Key: "$set", Value: bson.D{
+								{Key: "isSent", Value: true},
+							}},
+						})
+					}
+					//if there is no new tweet, sleep 5 seconds then continue loop
 				}
+
 			}
 		}
 	}
